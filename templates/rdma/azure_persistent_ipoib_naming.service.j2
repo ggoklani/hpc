@@ -1,0 +1,15 @@
+{{ ansible_managed | comment }}
+{{ "system_role:hpc" | comment(prefix="", postfix="") }}
+[Unit]
+Description=Azure persistent IPoIB netdev naming (ibX)
+After=systemd-udevd.service
+ConditionPathExists=/sys/class/infiniband
+
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/azure_persistent_ipoib_naming.sh
+StandardOutput=journal
+
+[Install]
+WantedBy=multi-user.target
+
