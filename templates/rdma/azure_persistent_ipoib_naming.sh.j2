@@ -1,0 +1,93 @@
+#!/usr/bin/env bash
+# These are templates, not actual shell scripts, so tell shellcheck to
+# ignore the templated parts
+# shellcheck disable=all
+{{ ansible_managed | comment }}
+{{ "system_role:hpc" | comment(prefix="", postfix="") }}
+# shellcheck enable=all
+set -euo pipefail
+
+if [[ ! -d /sys/class/infiniband ]]; then
+  exit 0
+fi
+
+if ! command -v udevadm >/dev/null 2>&1; then
+  exit 0
+fi
+
+if ! command -v ip >/dev/null 2>&1; then
+  exit 0
+fi
+
+mkdir -p /etc/systemd/network
+
+lock=/run/azure_persistent_ipoib_naming.lock
+exec 9>"$lock"
+flock -n 9 || exit 0
+
+# Build a stable, deterministic ordering key for each IPoIB interface, then assign ib0..ibN.
+tmp="$(mktemp)"
+trap 'rm -f "$tmp"' EXIT
+
+for npath in /sys/class/net/*; do
+  ndev="${npath##*/}"
+
+  # 32 == ARPHRD_INFINIBAND (IPoIB netdev)
+  [[ "$(cat "$npath/type" 2>/dev/null || true)" == "32" ]] || continue
+
+  props="$(udevadm info -q property -p "$npath" 2>/dev/null || true)"
+  id_path="$(printf "%s\n" "$props" | sed -n 's/^ID_PATH=//p' | head -n1)"
+  id_name_path="$(printf "%s\n" "$props" | sed -n 's/^ID_NET_NAME_PATH=//p' | head -n1)"
+  id_name_slot="$(printf "%s\n" "$props" | sed -n 's/^ID_NET_NAME_SLOT=//p' | head -n1)"
+
+  # Prefer the predictable name components for sorting; fall back to ID_PATH.
+  key="${id_name_path:-${id_name_slot:-${id_path:-}}}"
+  [[ -n "${key:-}" ]] || continue
+  [[ -n "${id_path:-}" ]] || continue
+
+  printf "%s\t%s\t%s\t%s\t%s\n" \
+    "$key" "$ndev" "$id_path" "${id_name_path:-}" "${id_name_slot:-}" >>"$tmp"
+done
+
+idx=0
+sort -t $'\t' -k1,1 "$tmp" | while IFS=$'\t' read -r key ndev id_path id_name_path id_name_slot; do
+  desired="ib${idx}"
+  out="/etc/systemd/network/10-ipoib-${desired}.link"
+
+  cat >"$out" <<EOF
+{{ ansible_managed | comment }}
+{{ "system_role:hpc" | comment(prefix="", postfix="") }}
+[Match]
+Type=infiniband
+Property=ID_PATH=${id_path}
+EOF
+
+  if [[ -n "${id_name_path:-}" ]]; then
+    printf 'Property=ID_NET_NAME_PATH=%s\n' "${id_name_path}" >>"$out"
+  elif [[ -n "${id_name_slot:-}" ]]; then
+    printf 'Property=ID_NET_NAME_SLOT=%s\n' "${id_name_slot}" >>"$out"
+  fi
+
+  cat >>"$out" <<EOF
+
+[Link]
+Name=${desired}
+EOF
+
+  if [[ "$ndev" != "$desired" ]]; then
+       if ip -o addr show dev "$ndev" 2>/dev/null | awk 'NF' | grep -q .; then
+      true
+    elif [[ "$(cat /sys/class/net/"$ndev"/operstate 2>/dev/null || true)" == "up" ]]; then
+      true
+    elif [[ -e "/sys/class/net/${desired}" ]]; then
+      true
+    else
+      echo "Renaming IPoIB netdev: ${ndev} -> ${desired}" >&2
+      ip link set dev "$ndev" down >/dev/null 2>&1 || true
+      ip link set dev "$ndev" name "$desired" >/dev/null 2>&1 || true
+      ip link set dev "$desired" up >/dev/null 2>&1 || true
+    fi
+  fi
+
+  idx=$((idx + 1))
+done

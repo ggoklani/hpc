@@ -1,0 +1,6 @@
+{{ ansible_managed | comment }}
+{{ "system_role:hpc" | comment(prefix="", postfix="") }}
+# Trigger persistent IPoIB netdev naming when an IPoIB interface appears.
+# ATTR{type}==32 corresponds to ARPHRD_INFINIBAND.
+SUBSYSTEM=="net", ACTION=="add", ATTR{type}=="32", TAG+="systemd", ENV{SYSTEMD_WANTS}="azure_persistent_ipoib_naming.service"
+
